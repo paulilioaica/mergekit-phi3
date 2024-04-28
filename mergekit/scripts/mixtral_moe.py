@@ -170,8 +170,11 @@ def get_gate_params(
                 model, tokenized=tokenized, average=mode == "hidden_avg"
             )
 
+
     gate_vecs = []
+    print(experts)
     for expert in tqdm.tqdm(experts, desc="expert prompts"):
+        print(_do_it)
         hidden_states = _do_it(tokenize_prompts(expert.positive_prompts, tokenizer))
         if expert.negative_prompts:
             hidden_states -= _do_it(
@@ -281,9 +284,14 @@ def build(
         base_cfg = base_cfg_mistral
 
     out_cfg = MixtralConfig(**base_cfg.to_dict())
-    out_cfg.architectures = ["MixtralForCausalLM"]
-    out_cfg.num_local_experts = len(config.experts)
+    out_cfg.model_type = "phi3"
+    out_cfg.architectures = ["Phi3ForCausalLM"]
+    out_cfg.num_experts = len(config.experts)
     out_cfg.num_experts_per_tok = config.experts_per_token
+    out_cfg.auto_map =  {
+        "AutoConfig": "configuration_phi3.Phi3Config",
+        "AutoModelForCausalLM": "modeling_phi3.Phi3ForCausalLM"
+    }
     out_cfg.sliding_window = None
     if config.dtype:
         out_cfg.torch_dtype = config.dtype
@@ -321,7 +329,7 @@ def build(
         out_dtype = None
 
     logging.info("Copying parameters...")
-    MISTRAL_INFO = mergekit.architecture.MISTRAL_INFO
+    MISTRAL_INFO = mergekit.architecture.PHI2_INFO
     for tensor_name in MISTRAL_INFO.pre_weight_names + MISTRAL_INFO.post_weight_names:
         tensor = base_loader.get_tensor(tensor_name)
         if not out_dtype:
@@ -330,22 +338,36 @@ def build(
         writer.save_tensor(
             tensor_name, tensor.to(dtype=out_dtype), clone=merge_options.clone_tensors
         )
+    seen_dict_of_tensors = {}
 
     for name_format in tqdm.tqdm(MISTRAL_INFO.layer_weight_formats()):
         for layer_idx in range(base_cfg.num_hidden_layers):
             tensor_name = name_format.format(idx=layer_idx)
-
-            if ".mlp." in name_format:
+            if ".mlp" in name_format:
                 for moe_index, expert in enumerate(config.experts):
-                    expert_name = tensor_name.replace(
-                        ".mlp.gate_proj", f".block_sparse_moe.experts.{moe_index}.w1"
-                    )
-                    expert_name = expert_name.replace(
-                        ".mlp.down_proj", f".block_sparse_moe.experts.{moe_index}.w2"
-                    )
-                    expert_name = expert_name.replace(
-                        ".mlp.up_proj", f".block_sparse_moe.experts.{moe_index}.w3"
-                    )
+                    if tensor_name in seen_dict_of_tensors:
+                        if "gate_up" in tensor_name:
+                            expert_name = tensor_name.replace(
+                                ".mlp.gate_up_proj", f".mlp.gate_up_proj.{seen_dict_of_tensors[tensor_name]}"
+                            )
+                        elif "down_proj" in tensor_name:
+                            expert_name = tensor_name.replace(
+                            ".mlp.down_proj", f".mlp.down_proj.{seen_dict_of_tensors[tensor_name]}"
+                        )
+                        seen_dict_of_tensors[tensor_name] += 1 
+                        
+                        
+                    else:
+                        seen_dict_of_tensors[tensor_name] = 1
+                        if "gate_up" in tensor_name:
+                            expert_name = tensor_name.replace(
+                                ".mlp.gate_up_proj", f".mlp.gate_up_proj.0"
+                            )
+                        elif "down_proj" in tensor_name:
+                            expert_name = tensor_name.replace(
+                            ".mlp.down_proj", f".mlp.down_proj.0"
+                        )
+
                     expert_loader = loaders.get(expert.model_ref)
                     tensor = expert_loader.get_tensor(tensor_name)
                     if expert.noise_scale:
@@ -354,6 +376,7 @@ def build(
                         expert_name, tensor.to(dtype=out_dtype), clone=True
                     )
                 continue
+            
             writer.save_tensor(
                 tensor_name, base_loader.get_tensor(tensor_name).to(dtype=out_dtype)
             )
@@ -382,7 +405,7 @@ def build(
 
     for layer_idx in range(base_cfg.num_hidden_layers):
         writer.save_tensor(
-            f"model.layers.{layer_idx}.block_sparse_moe.gate.weight",
+            f"model.layers.{layer_idx}.mlp.gate.weight",
             gate_vecs[layer_idx, :, :].contiguous().to(dtype=out_dtype),
         )
     writer.finalize()
