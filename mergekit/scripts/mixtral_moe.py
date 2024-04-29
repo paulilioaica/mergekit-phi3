@@ -283,7 +283,11 @@ def build(
         base_cfg_mistral.max_position_embeddings = base_cfg.max_position_embeddings
         base_cfg = base_cfg_mistral
 
-    out_cfg = MixtralConfig(**base_cfg.to_dict())
+    custom_Phi3_config = MixtralConfig
+    custom_Phi3_config.model_type = "phi3"
+
+
+    out_cfg = custom_Phi3_config(**base_cfg.to_dict())
     out_cfg.model_type = "phi3"
     out_cfg.architectures = ["Phi3ForCausalLM"]
     out_cfg.num_experts = len(config.experts)
